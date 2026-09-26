@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>净额批次核对 - 证券结算与企业行动处理</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
+    main { max-width: 1080px; margin: auto; }
+    button { padding: .55rem .9rem; cursor: pointer; }
+    input, select { padding: .45rem .6rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #d7dee6; padding: .45rem .6rem; text-align: left; font-size: .92rem; }
+    th { background: #f4f6f8; }
+    .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+    .card { border: 1px solid #d7dee6; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+    .muted { color: #5b6b7c; }
+    .pos { color: #0a7d2c; }
+    .neg { color: #b3261e; }
+    #message { color: #b3261e; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>净额批次核对</h1>
+  <p class="muted">按结算账户与交收日查看净收付、组成明细与批次状态。数据持久化于服务端，重启后核对结果一致。<a href="/">返回记录页</a></p>
+  <div class="row">
+    <label>结算账户 <input id="account" placeholder="如 ACC-001"></label>
+    <label>交收日 <input id="day" type="number" min="0" step="1" placeholder="如 2"></label>
+    <label>状态
+      <select id="state">
+        <option value="">全部</option>
+        <option value="open">归集中</option>
+        <option value="confirmed">已确认</option>
+        <option value="settled">已交收</option>
+        <option value="failed">交收失败</option>
+        <option value="cancelled">已取消</option>
+      </select>
+    </label>
+    <button id="query">查询</button>
+    <span id="message"></span>
+  </div>
+  <div id="batches"></div>
+  <div id="detail"></div>
+</main>
+<script>
+const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
+const STATE_LABELS = {open:"归集中", confirmed:"已确认", settled:"已交收", failed:"交收失败", cancelled:"已取消"};
+const ITEM_STATUS = {included:"组成中", returned:"已退回"};
+const EVENT_LABELS = {created:"创建批次", confirm:"确认批次", refresh:"重新归集", settle:"批次交收", fail:"交收失败", cancel:"取消批次", record_returned:"单据退回"};
+
+async function api(path) {
+  const response = await fetch(path, {headers});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.message || ("HTTP " + response.status));
+  return data;
+}
+
+function stateLabel(state) { return STATE_LABELS[state] || state; }
+
+function netCashText(amount) {
+  const value = Number(amount).toFixed(2);
+  if (amount > 0) return '<span class="neg">净应付 ' + value + '</span>';
+  if (amount < 0) return '<span class="pos">净应收 ' + Math.abs(amount).toFixed(2) + '</span>';
+  return '<span class="muted">0.00</span>';
+}
+
+function netQtyText(quantity) {
+  if (quantity > 0) return '<span class="pos">净买入 +' + quantity + '</span>';
+  if (quantity < 0) return '<span class="neg">净卖出 ' + quantity + '</span>';
+  return "0";
+}
+
+async function query() {
+  const message = document.getElementById("message");
+  message.textContent = "";
+  document.getElementById("detail").innerHTML = "";
+  try {
+    const params = new URLSearchParams();
+    const account = document.getElementById("account").value.trim();
+    const day = document.getElementById("day").value.trim();
+    const state = document.getElementById("state").value;
+    if (account) params.set("account", account);
+    if (day !== "") params.set("settlement_day", day);
+    if (state) params.set("state", state);
+    const data = await api("/api/net-batches?" + params.toString());
+    renderBatches(data.items || []);
+  } catch (err) {
+    message.textContent = err.message;
+    document.getElementById("batches").innerHTML = "";
+  }
+}
+
+function renderBatches(items) {
+  const host = document.getElementById("batches");
+  if (!items.length) {
+    host.innerHTML = '<p class="muted">没有符合条件的净额批次。</p>';
+    return;
+  }
+  const rows = items.map(batch => {
+    const totals = batch.totals || {};
+    return "<tr>" +
+      "<td>" + batch.id + "</td>" +
+      "<td>" + batch.account + "</td>" +
+      "<td>" + batch.currency + "</td>" +
+      "<td>" + batch.settlement_day + "</td>" +
+      "<td>" + stateLabel(batch.state) + "</td>" +
+      "<td>" + netCashText(totals.net_amount || 0) + "</td>" +
+      "<td>" + (totals.item_count || 0) + "</td>" +
+      '<td><button data-batch="' + batch.id + '">查看</button></td>' +
+      "</tr>";
+  }).join("");
+  host.innerHTML = "<table><thead><tr><th>批次</th><th>结算账户</th><th>币种</th><th>交收日</th><th>状态</th><th>净收付</th><th>明细数</th><th></th></tr></thead><tbody>" + rows + "</tbody></table>";
+  host.querySelectorAll("button[data-batch]").forEach(button => {
+    button.onclick = () => showDetail(button.getAttribute("data-batch"));
+  });
+}
+
+async function showDetail(batchId) {
+  const message = document.getElementById("message");
+  message.textContent = "";
+  try {
+    const batch = await api("/api/net-batches/" + batchId);
+    const events = await api("/api/net-batches/" + batchId + "/audit");
+    renderDetail(batch, events.items || []);
+  } catch (err) {
+    message.textContent = err.message;
+  }
+}
+
+function renderDetail(batch, events) {
+  const totals = batch.totals || {};
+  const positions = totals.positions || {};
+  const positionRows = Object.keys(positions).map(instrument =>
+    "<tr><td>" + instrument + "</td><td>" + netQtyText(positions[instrument]) + "</td></tr>"
+  ).join("") || '<tr><td colspan="2" class="muted">全部相抵，无净券收付</td></tr>';
+  const itemRows = (batch.items || []).map(item =>
+    "<tr>" +
+    "<td>" + item.record_id + "</td>" +
+    "<td>" + item.instrument + "</td>" +
+    "<td>" + (item.side === "buy" ? "买入" : "卖出") + "</td>" +
+    "<td>" + netQtyText(item.signed_quantity) + "</td>" +
+    "<td>" + Number(item.signed_amount).toFixed(2) + "</td>" +
+    "<td>" + (ITEM_STATUS[item.status] || item.status) + "</td>" +
+    "</tr>"
+  ).join("") || '<tr><td colspan="6" class="muted">暂无组成单据</td></tr>';
+  const eventRows = events.map(event =>
+    "<tr>" +
+    "<td>" + (EVENT_LABELS[event.action] || event.action) + "</td>" +
+    "<td>" + event.actor_id + "</td>" +
+    "<td>" + (event.details && event.details.summary ? event.details.summary : "") + "</td>" +
+    "<td>" + event.created_at + "</td>" +
+    "</tr>"
+  ).join("");
+  document.getElementById("detail").innerHTML =
+    '<div class="card"><h2>批次 #' + batch.id + "（" + stateLabel(batch.state) + "）</h2>" +
+    '<p>结算账户 ' + batch.account + " ｜ 币种 " + batch.currency + " ｜ 交收日 " + batch.settlement_day +
+    " ｜ 净收付 " + netCashText(totals.net_amount || 0) +
+    (totals.cash_paid !== undefined ? " ｜ 实付 " + Number(totals.cash_paid).toFixed(2) : "") + "</p>" +
+    "<h3>净券收付</h3><table><thead><tr><th>证券</th><th>净数量</th></tr></thead><tbody>" + positionRows + "</tbody></table>" +
+    "<h3>组成明细</h3><table><thead><tr><th>单据</th><th>证券</th><th>方向</th><th>带符号数量</th><th>带符号金额</th><th>状态</th></tr></thead><tbody>" + itemRows + "</tbody></table>" +
+    "<h3>状态轨迹</h3><table><thead><tr><th>事件</th><th>操作人</th><th>说明</th><th>时间</th></tr></thead><tbody>" + eventRows + "</tbody></table>" +
+    "</div>";
+}
+
+document.getElementById("query").onclick = query;
+query();
+</script>
+</body>
+</html>

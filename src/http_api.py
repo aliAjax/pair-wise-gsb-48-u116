@@ -12,6 +12,9 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+NET_BATCH_RE = re.compile(r"^/api/net-batches/(\d+)$")
+NET_BATCH_ACTION_RE = re.compile(r"^/api/net-batches/(\d+)/actions/([a-z_]+)$")
+NET_BATCH_AUDIT_RE = re.compile(r"^/api/net-batches/(\d+)/audit$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -71,6 +74,10 @@ def make_handler(service: Any, static_dir: Path):
                     page = (static_dir / "index.html").read_bytes()
                     self._send(200, page, "text/html; charset=utf-8")
                     return
+                if parsed.path == "/netting.html":
+                    page = (static_dir / "netting.html").read_bytes()
+                    self._send(200, page, "text/html; charset=utf-8")
+                    return
                 if parsed.path == "/api/records":
                     query = parse_qs(parsed.query)
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
@@ -87,6 +94,26 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
+                if parsed.path == "/api/net-batches":
+                    query = parse_qs(parsed.query)
+                    day_raw = query.get("settlement_day", [None])[0]
+                    day = None
+                    if day_raw not in (None, ""):
+                        try:
+                            day = int(day_raw)
+                        except ValueError as exc:
+                            raise ValidationError("settlement_day必须是整数") from exc
+                    batches = service.list_batches(self._actor(), account=query.get("account", [None])[0], settlement_day=day, state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
+                    self._send(200, {"items": batches})
+                    return
+                match = NET_BATCH_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.get_batch(self._actor(), int(match.group(1))))
+                    return
+                match = NET_BATCH_AUDIT_RE.match(parsed.path)
+                if match:
+                    self._send(200, {"items": service.batch_timeline(self._actor(), int(match.group(1)))})
+                    return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -99,6 +126,10 @@ def make_handler(service: Any, static_dir: Path):
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
                     return
+                if parsed.path == "/api/net-batches":
+                    batch = service.create_batch(self._actor(), body)
+                    self._send(201, batch)
+                    return
                 match = ACTION_RE.match(parsed.path)
                 if match:
                     version = body.get("expected_version")
@@ -106,6 +137,14 @@ def make_handler(service: Any, static_dir: Path):
                         raise ValidationError("expected_version必须是整数")
                     record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
                     self._send(200, record)
+                    return
+                match = NET_BATCH_ACTION_RE.match(parsed.path)
+                if match:
+                    version = body.get("expected_version")
+                    if not isinstance(version, int):
+                        raise ValidationError("expected_version必须是整数")
+                    batch = service.act_batch(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
+                    self._send(200, batch)
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:

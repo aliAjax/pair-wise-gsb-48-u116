@@ -4,6 +4,9 @@ from pathlib import Path
 
 from src.audit import AuditRecorder
 from src.http_api import create_server
+from src.netting import NettingRules
+from src.netting_repository import NettingRepository
+from src.netting_service import NettingService
 from src.repository import Repository
 from src.rules import DomainRules
 from src.service import Service
@@ -17,7 +20,10 @@ DEFAULT_PORT = 8324
 def build_service(db_path: str) -> Service:
     repository = Repository(db_path)
     audit = AuditRecorder(repository)
-    return Service(repository, DomainRules(), audit)
+    rules = DomainRules()
+    netting_repository = NettingRepository(db_path)
+    netting = NettingService(repository, netting_repository, NettingRules(), rules)
+    return Service(repository, rules, audit, netting=netting)
 
 
 def parse_args():

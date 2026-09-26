@@ -92,6 +92,18 @@ class Repository:
                 rows = connection.execute("SELECT * FROM records ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self._row(row) for row in rows]
 
+    def list_for_netting(self, account: str, currency: str, settlement_day: int, states: List[str]) -> List[Dict[str, Any]]:
+        placeholders = ",".join("?" for _ in states)
+        sql = (
+            "SELECT * FROM records WHERE json_extract(payload,'$.settlement_account')=?"
+            " AND json_extract(payload,'$.currency')=? AND json_extract(payload,'$.settlement_day')=?"
+            " AND state IN (%s) ORDER BY id" % placeholders
+        )
+        params = [account, currency, int(settlement_day)] + list(states)
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._row(row) for row in rows]
+
     def mutate(self, record_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any]) -> Dict[str, Any]:
         now = _now()
         with self._connect() as connection:

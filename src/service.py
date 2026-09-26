@@ -2,16 +2,17 @@
 from typing import Any, Dict, List, Optional
 
 from .audit import AuditRecorder
-from .domain import Actor, PermissionDenied, text
+from .domain import Actor, DomainError, PermissionDenied, text
 from .repository import Repository
 from .rules import DomainRules
 
 
 class Service:
-    def __init__(self, repository: Repository, rules: DomainRules, audit: AuditRecorder = None) -> None:
+    def __init__(self, repository: Repository, rules: DomainRules, audit: AuditRecorder = None, netting: Any = None) -> None:
         self.repository = repository
         self.rules = rules
         self.audit = audit or AuditRecorder(repository)
+        self.netting = netting
 
     @staticmethod
     def _actor(actor: Actor) -> Actor:
@@ -51,6 +52,8 @@ class Service:
             raise PermissionDenied("角色无权执行该操作")
         record = self.repository.get(record_id)
         self.rules.require_transition(record, action)
+        if self.netting is not None:
+            self.netting.before_record_action(actor, record, action)
         new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})
         return self.repository.mutate(
             record_id=record_id,
@@ -71,3 +74,23 @@ class Service:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
         return self.repository.stats()
+
+    def _require_netting(self) -> Any:
+        if self.netting is None:
+            raise DomainError("净额批次服务未启用")
+        return self.netting
+
+    def create_batch(self, actor: Actor, data: Dict[str, Any]) -> Dict[str, Any]:
+        return self._require_netting().create_batch(actor, data or {})
+
+    def list_batches(self, actor: Actor, account: Optional[str] = None, settlement_day: Optional[int] = None, state: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        return self._require_netting().list_batches(actor, account=account, settlement_day=settlement_day, state=state, limit=limit)
+
+    def get_batch(self, actor: Actor, batch_id: int) -> Dict[str, Any]:
+        return self._require_netting().get_batch(actor, batch_id)
+
+    def act_batch(self, actor: Actor, batch_id: int, expected_version: int, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        return self._require_netting().act_batch(actor, batch_id, expected_version, action, data or {})
+
+    def batch_timeline(self, actor: Actor, batch_id: int) -> List[Dict[str, Any]]:
+        return self._require_netting().batch_timeline(actor, batch_id)
