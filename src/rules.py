@@ -28,6 +28,7 @@ class DomainRules:
     def validate_create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         p = dict(payload)
         text(p, "instrument")
+        text(p, "settlement_account")
         choice(p, "side", ["buy", "sell"])
         integer(p, "quantity", 1)
         number(p, "price", 0.01)

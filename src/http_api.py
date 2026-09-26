@@ -7,6 +7,8 @@ from typing import Any, Dict
 from urllib.parse import parse_qs, urlparse
 
 from .domain import Actor, DomainError, PermissionDenied, ValidationError
+from .netting_api import handle_get as handle_netting_get
+from .netting_api import handle_post as handle_netting_post
 
 
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
@@ -14,7 +16,7 @@ ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
 
 
-def make_handler(service: Any, static_dir: Path):
+def make_handler(service: Any, static_dir: Path, netting_service: Any = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "securities-settlement/1.0"
 
@@ -71,6 +73,10 @@ def make_handler(service: Any, static_dir: Path):
                     page = (static_dir / "index.html").read_bytes()
                     self._send(200, page, "text/html; charset=utf-8")
                     return
+                if parsed.path == "/netting.html":
+                    page = (static_dir / "netting.html").read_bytes()
+                    self._send(200, page, "text/html; charset=utf-8")
+                    return
                 if parsed.path == "/api/records":
                     query = parse_qs(parsed.query)
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
@@ -86,6 +92,8 @@ def make_handler(service: Any, static_dir: Path):
                     return
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
+                    return
+                if netting_service is not None and handle_netting_get(self, netting_service, parsed):
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
@@ -107,6 +115,8 @@ def make_handler(service: Any, static_dir: Path):
                     record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
                     self._send(200, record)
                     return
+                if netting_service is not None and handle_netting_post(self, netting_service, parsed, body):
+                    return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -114,5 +124,5 @@ def make_handler(service: Any, static_dir: Path):
     return Handler
 
 
-def create_server(host: str, port: int, service: Any, static_dir: Path) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(service, static_dir))
+def create_server(host: str, port: int, service: Any, static_dir: Path, netting_service: Any = None) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(service, static_dir, netting_service))

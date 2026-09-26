@@ -8,10 +8,11 @@ from .rules import DomainRules
 
 
 class Service:
-    def __init__(self, repository: Repository, rules: DomainRules, audit: AuditRecorder = None) -> None:
+    def __init__(self, repository: Repository, rules: DomainRules, audit: AuditRecorder = None, record_guards=None) -> None:
         self.repository = repository
         self.rules = rules
         self.audit = audit or AuditRecorder(repository)
+        self.record_guards = list(record_guards or [])
 
     @staticmethod
     def _actor(actor: Actor) -> Actor:
@@ -49,6 +50,8 @@ class Service:
         action = text({"action": action}, "action")
         if not self.rules.role_can_action(actor.role, action):
             raise PermissionDenied("角色无权执行该操作")
+        for guard in self.record_guards:
+            guard(record_id, action)
         record = self.repository.get(record_id)
         self.rules.require_transition(record, action)
         new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})

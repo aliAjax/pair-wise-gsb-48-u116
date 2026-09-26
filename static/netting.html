@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>净额批次 - 证券结算</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
+    main { max-width: 1080px; margin: auto; }
+    table { border-collapse: collapse; width: 100%; margin: .6rem 0 1rem; }
+    th, td { border: 1px solid #d7dee6; padding: .4rem .6rem; text-align: left; font-size: .92rem; }
+    th { background: #f0f3f7; }
+    button { padding: .45rem .8rem; cursor: pointer; }
+    input, select { padding: .4rem; }
+    .row { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; margin: .5rem 0; }
+    .card { border: 1px solid #d7dee6; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+    .pos { color: #0a7a34; }
+    .neg { color: #b3261e; }
+    #message { color: #b3261e; min-height: 1.2rem; }
+    pre { background: #f4f6f8; padding: .8rem; overflow: auto; border-radius: 8px; font-size: .85rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>净额批次</h1>
+  <p>按结算账户、币种和交收日归集已复核单据：买入为正、卖出为负，同一证券先相抵；已应用公司行动的按调整后数量参与。批次确认后组成单据不能另行结清，冲正或交收失败先退回批次。<a href="/">返回单据页</a></p>
+
+  <section class="card">
+    <div class="row">
+      <label>结算账户 <input id="f-account" placeholder="如 ACC-001"></label>
+      <label>交收日 <input id="f-day" type="number" min="0" style="width:6rem"></label>
+      <label>状态
+        <select id="f-state">
+          <option value="">全部</option>
+          <option value="open">归集中</option>
+          <option value="confirmed">已确认</option>
+          <option value="settled">已交收</option>
+          <option value="returned">已退回</option>
+          <option value="discarded">已废弃</option>
+        </select>
+      </label>
+      <button id="query">查询</button>
+    </div>
+    <div class="row">
+      <span>新建批次：</span>
+      <label>结算账户 <input id="n-account" placeholder="如 ACC-001"></label>
+      <label>币种 <select id="n-currency"><option>CNY</option><option>USD</option><option>HKD</option></select></label>
+      <label>交收日 <input id="n-day" type="number" min="0" style="width:6rem"></label>
+      <button id="build">归集建批</button>
+    </div>
+    <div id="message"></div>
+  </section>
+
+  <section class="card">
+    <h2>批次列表</h2>
+    <table>
+      <thead><tr><th>批次号</th><th>结算账户</th><th>币种</th><th>交收日</th><th>状态</th><th>净现金收付</th><th>单据数</th><th></th></tr></thead>
+      <tbody id="batches"><tr><td colspan="8">暂无数据</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card" id="detail" hidden>
+    <h2>批次明细 <span id="d-ref"></span></h2>
+    <div id="d-info"></div>
+    <h3>证券净额</h3>
+    <table>
+      <thead><tr><th>证券</th><th>买入量</th><th>卖出量</th><th>净额</th><th>方向</th></tr></thead>
+      <tbody id="d-positions"></tbody>
+    </table>
+    <div id="d-cash"></div>
+    <h3>组成单据</h3>
+    <table>
+      <thead><tr><th>单据号</th><th>参考号</th><th>证券</th><th>买卖</th><th>参与数量</th><th>签名数量</th><th>净额金额</th><th>签名现金</th><th>公司行动</th><th>状态</th></tr></thead>
+      <tbody id="d-items"></tbody>
+    </table>
+    <h3>操作</h3>
+    <div class="row" id="d-actions"></div>
+    <h3>批次时间线</h3>
+    <pre id="d-audit"></pre>
+  </section>
+</main>
+<script>
+const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo","Content-Type":"application/json"};
+const STATE_LABELS = {open:"归集中",confirmed:"已确认",settled:"已交收",returned:"已退回",discarded:"已废弃"};
+const CASH_DIR = {receive:"净收",pay:"净付",flat:"持平"};
+const QTY_DIR = {receive:"净应收（券）",deliver:"净应付（券）",flat:"持平"};
+let current = null;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const money = (v) => '<span class="'+(v>0?"pos":(v<0?"neg":""))+'">'+Number(v).toFixed(2)+"</span>";
+const qty = (v) => '<span class="'+(v>0?"pos":(v<0?"neg":""))+'">'+v+"</span>";
+const showError = (text) => { $("message").textContent = text || ""; };
+
+async function api(path, options) {
+  const response = await fetch(path, Object.assign({headers: headers}, options || {}));
+  const data = await response.json();
+  if (!response.ok) { throw new Error(data.message || ("请求失败 " + response.status)); }
+  return data;
+}
+
+async function loadBatches() {
+  const params = new URLSearchParams();
+  const account = $("f-account").value.trim();
+  const day = $("f-day").value;
+  const state = $("f-state").value;
+  if (account) { params.set("account", account); }
+  if (day !== "") { params.set("settlement_day", day); }
+  if (state) { params.set("state", state); }
+  try {
+    const data = await api("/api/netting/batches?" + params.toString());
+    const body = $("batches");
+    if (!data.items.length) {
+      body.innerHTML = '<tr><td colspan="8">暂无数据</td></tr>';
+    } else {
+      body.innerHTML = data.items.map((b) =>
+        "<tr><td>"+esc(b.batch_ref)+"</td><td>"+esc(b.settlement_account)+"</td><td>"+esc(b.currency)+"</td><td>"+b.settlement_day+"</td><td>"+esc(STATE_LABELS[b.state]||b.state)+"</td><td>"+money(b.totals.net_cash)+"</td><td>"+b.totals.record_count+"</td><td><button class=\"view\" data-id=\""+b.id+"\">明细</button></td></tr>"
+      ).join("");
+      body.querySelectorAll("button.view").forEach((btn) => { btn.onclick = () => loadDetail(Number(btn.dataset.id)); });
+    }
+    showError("");
+  } catch (e) { showError(e.message); }
+}
+
+async function buildBatch() {
+  try {
+    const batch = await api("/api/netting/batches", {method: "POST", body: JSON.stringify({
+      settlement_account: $("n-account").value.trim(),
+      currency: $("n-currency").value,
+      settlement_day: Number($("n-day").value)
+    })});
+    showError("");
+    await loadBatches();
+    await loadDetail(batch.id);
+  } catch (e) { showError(e.message); }
+}
+
+async function loadDetail(id) {
+  try {
+    current = await api("/api/netting/batches/" + id);
+    renderDetail();
+    const audit = await api("/api/netting/batches/" + id + "/audit");
+    $("d-audit").textContent = audit.items.map((e) => e.created_at + "  " + e.action + "  " + e.actor_id + "  " + (e.details.summary || "")).join("\n");
+    $("detail").hidden = false;
+    showError("");
+  } catch (e) { showError(e.message); }
+}
+
+function renderDetail() {
+  const batch = current.batch;
+  const totals = batch.totals;
+  $("d-ref").textContent = batch.batch_ref;
+  $("d-info").innerHTML = "结算账户 <b>"+esc(batch.settlement_account)+"</b> ｜ 币种 <b>"+esc(batch.currency)+"</b> ｜ 交收日 <b>"+batch.settlement_day+"</b> ｜ 状态 <b>"+esc(STATE_LABELS[batch.state]||batch.state)+"</b> ｜ 版本 "+batch.version;
+  $("d-positions").innerHTML = totals.instruments.map((p) =>
+    "<tr><td>"+esc(p.instrument)+"</td><td>"+p.buy_quantity+"</td><td>"+p.sell_quantity+"</td><td>"+qty(p.net_quantity)+"</td><td>"+esc(QTY_DIR[p.direction]||p.direction)+"</td></tr>"
+  ).join("");
+  $("d-cash").innerHTML = "现金净收付：" + money(totals.net_cash) + " " + esc(batch.currency) + "（" + esc(CASH_DIR[totals.cash_direction]||"") + "）";
+  $("d-items").innerHTML = current.items.map((line) =>
+    "<tr><td>"+line.record_id+"</td><td>"+esc(line.reference)+"</td><td>"+esc(line.instrument)+"</td><td>"+(line.side==="buy"?"买入":"卖出")+"</td><td>"+line.quantity+"</td><td>"+qty(line.signed_quantity)+"</td><td>"+money(line.net_amount)+"</td><td>"+money(line.signed_cash)+"</td><td>"+(line.corporate_applied?"已应用":"-")+"</td><td>"+esc(line.state)+"</td></tr>"
+  ).join("");
+  const actions = [];
+  if (batch.state === "open" || batch.state === "returned") {
+    actions.push(["confirm", "确认批次"], ["discard", "废弃批次"]);
+  } else if (batch.state === "confirmed") {
+    actions.push(["settle", "净额交收"], ["fail", "交收失败"]);
+  } else if (batch.state === "settled") {
+    actions.push(["reverse", "批次冲正"]);
+  }
+  const box = $("d-actions");
+  box.innerHTML = actions.length ? "" : "当前状态无可执行操作。";
+  actions.forEach(([action, label]) => {
+    const btn = document.createElement("button");
+    btn.textContent = label;
+    btn.onclick = () => runAction(action);
+    box.appendChild(btn);
+  });
+}
+
+async function runAction(action) {
+  const batch = current.batch;
+  let data = {};
+  if (action === "settle") {
+    const delivered = {};
+    batch.totals.instruments.forEach((p) => { delivered[p.instrument] = Math.abs(p.net_quantity); });
+    data = {delivered: delivered, cash_settled: Math.abs(batch.totals.net_cash)};
+    if (!window.confirm("按净额交收：现金 " + data.cash_settled.toFixed(2) + " " + batch.currency + "，确认？")) { return; }
+  } else if (action === "fail") {
+    const reason = window.prompt("失败原因：");
+    if (!reason) { return; }
+    data = {fail_reason: reason};
+  } else if (action === "reverse") {
+    const reason = window.prompt("冲正原因：");
+    if (!reason) { return; }
+    data = {reverse_reason: reason};
+  } else if (action === "discard") {
+    if (!window.confirm("废弃后组成单据解除归集，确认？")) { return; }
+  }
+  try {
+    await api("/api/netting/batches/" + batch.id + "/actions/" + action, {method: "POST", body: JSON.stringify({expected_version: batch.version, data: data})});
+    await loadDetail(batch.id);
+    await loadBatches();
+  } catch (e) { showError(e.message); }
+}
+
+$("query").onclick = loadBatches;
+$("build").onclick = buildBatch;
+loadBatches();
+</script>
+</body>
+</html>
